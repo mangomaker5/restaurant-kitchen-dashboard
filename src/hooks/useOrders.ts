@@ -8,35 +8,11 @@ export const useOrders = () => {
   const [completedToday, setCompletedToday] = useState(0)
   const [newOrderIds, setNewOrderIds] = useState<Set<string>>(new Set())
 
-  const groupOrdersByUuid = (orderItems: OrderItem[]): GroupedOrder[] => {
-    const grouped = orderItems.reduce((acc, item) => {
-      const existing = acc.find(group => group.order_uuid === item.order_uuid)
-      
-      if (existing) {
-        existing.items.push(item)
-        existing.total += item.subtotal
-        existing.item_count += item.quantity
-      } else {
-        acc.push({
-          order_uuid: item.order_uuid,
-          table_number: item.table_number,
-          items: [item],
-          total: item.subtotal,
-          created_at: item.created_at,
-          item_count: item.quantity
-        })
-      }
-      
-      return acc
-    }, [] as GroupedOrder[])
-
-    return grouped.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
-  }
-
   const fetchOrders = async () => {
     try {
+      setLoading(true)
       setError(null)
-      
+
       // Fetch active orders
       const { data: orderItems, error: ordersError } = await supabase
         .from('order_items')
@@ -45,21 +21,43 @@ export const useOrders = () => {
 
       if (ordersError) throw ordersError
 
-      const groupedOrders = groupOrdersByUuid(orderItems || [])
-      setOrders(groupedOrders)
+      // Group orders by order_uuid
+      const groupedOrders = (orderItems || []).reduce((acc, item) => {
+        const existingOrder = acc.find(order => order.order_uuid === item.order_uuid)
+        
+        if (existingOrder) {
+          existingOrder.items.push(item)
+          existingOrder.total += item.subtotal
+          existingOrder.item_count += item.quantity
+        } else {
+          acc.push({
+            order_uuid: item.order_uuid,
+            table_number: item.table_number,
+            created_at: item.created_at,
+            items: [item],
+            total: item.subtotal,
+            item_count: item.quantity
+          })
+        }
+        
+        return acc
+      }, [] as GroupedOrder[])
 
       // Fetch completed orders count for today
-      const today = new Date()
-      today.setHours(0, 0, 0, 0)
-      
-      const { count, error: completedError } = await supabase
+      const today = new Date().toISOString().split('T')[0]
+      const { data: completedOrders, error: completedError } = await supabase
         .from('completed_orders')
-        .select('*', { count: 'exact', head: true })
-        .gte('completed_at', today.toISOString())
+        .select('order_uuid')
+        .gte('completed_at', `${today}T00:00:00`)
+        .lt('completed_at', `${today}T23:59:59`)
 
       if (completedError) throw completedError
+
+      // Count unique completed orders for today
+      const uniqueCompletedOrders = new Set(completedOrders?.map(order => order.order_uuid) || [])
       
-      setCompletedToday(count || 0)
+      setOrders(groupedOrders)
+      setCompletedToday(uniqueCompletedOrders.size)
     } catch (err) {
       console.error('Error fetching orders:', err)
       setError(err instanceof Error ? err.message : 'Failed to fetch orders')
@@ -81,13 +79,16 @@ export const useOrders = () => {
         throw new Error('Order not found')
       }
 
-      // Prepare completed order data
-      const completedOrderData = orderItems.map(item => ({
-        ...item,
-        completed_at: new Date().toISOString()
-      }))
+      // ✅ FIXED: Prepare completed order data - EXCLUDE the 'id' field to avoid conflicts
+      const completedOrderData = orderItems.map(item => {
+        const { id, ...itemWithoutId } = item  // Remove 'id' field
+        return {
+          ...itemWithoutId,
+          completed_at: new Date().toISOString()
+        }
+      })
 
-      // Insert into completed_orders table
+      // Insert into completed_orders table (new IDs will be auto-generated)
       const { error: insertError } = await supabase
         .from('completed_orders')
         .insert(completedOrderData)
@@ -160,6 +161,7 @@ export const useOrders = () => {
       printWindow.document.write(printContent)
       printWindow.document.close()
       printWindow.print()
+      printWindow.close()
     }
   }
 
